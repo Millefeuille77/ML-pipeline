@@ -189,6 +189,9 @@ def category_trends(
     if frame.empty:
         return []
     frame = frame.sort_values(["category", "month"]).reset_index(drop=True)
+    # WHY: NUMERIC columns from Postgres arrive as decimal.Decimal which
+    # cannot multiply with Python float; cast first so pct_change yields float.
+    frame["total_units_sold"] = frame["total_units_sold"].astype(float)
     frame["delta_pct"] = frame.groupby("category")["total_units_sold"].pct_change() * 100.0
     return frame.to_dict(orient="records")
 

@@ -5,6 +5,7 @@ Idempotent — safe to re-execute (DROP+CREATE for schema, ON CONFLICT for rows)
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable
@@ -42,10 +43,16 @@ def create_schema() -> None:
 
 
 def _split_sql_statements(script: str) -> Iterable[str]:
-    """Split a SQL script on `;` while ignoring blank/comment-only chunks."""
-    for raw in script.split(";"):
+    """Split a SQL script on `;` while ignoring blank/comment-only chunks.
+
+    WHY: a previous implementation only skipped chunks whose FIRST stripped
+    line started with `--`. Statements preceded by header comments were
+    silently dropped, breaking idempotency on re-runs.
+    """
+    no_line_comments = re.sub(r"--[^\n]*", "", script)
+    for raw in no_line_comments.split(";"):
         stripped = raw.strip()
-        if stripped and not stripped.startswith("--"):
+        if stripped:
             yield stripped
 
 
@@ -93,6 +100,10 @@ def load_weekly_features(weekly_df: pd.DataFrame) -> int:
     """Load the weekly modeling table from `weekly_df_final_for_modeling.csv`."""
     frame = weekly_df.copy()
     frame["week"] = pd.to_datetime(frame["week"]).dt.date
+    # WHY: pandas infers `is_holiday_peak` as bool from the CSV; schema declares
+    # SMALLINT for consistency with the other holiday/season flags.
+    if frame["is_holiday_peak"].dtype == bool:
+        frame["is_holiday_peak"] = frame["is_holiday_peak"].astype("int8")
     inserted = _bulk_insert("weekly_features", frame, ["sku", "week", "channel", "region"])
     logger.info("weekly_features_loaded", extra={"row_count": inserted})
     return inserted

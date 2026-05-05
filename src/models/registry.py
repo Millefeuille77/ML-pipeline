@@ -100,9 +100,10 @@ def save_model(
         "created_at": timestamp,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    # WHY: "name" is a reserved LogRecord field; use model_name to avoid KeyError
     logger.info(
         "model_saved",
-        extra={"name": name, "version": version, "path": str(artifact_path)},
+        extra={"model_name": name, "version": version, "path": str(artifact_path)},
     )
     return ModelInfo(
         name=name,

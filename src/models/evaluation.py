@@ -148,14 +148,29 @@ def _aggregate_metrics(folds: list[FoldResult]) -> dict[str, float]:
     return {key: float(np.mean([fold.metrics[key] for fold in folds])) for key in keys}
 
 
-def compare_models(weekly_df: pd.DataFrame) -> ComparisonReport:
+def compare_models(
+    weekly_df: pd.DataFrame,
+    n_splits: int = _DEFAULT_SPLITS,
+    train_weeks: int = _DEFAULT_TRAIN_WEEKS,
+    test_weeks: int = _DEFAULT_TEST_WEEKS,
+) -> ComparisonReport:
     """Compare GBR vs Ridge with the same walk-forward protocol.
+
+    Args:
+        weekly_df: Weekly DataFrame filtered to one category.
+        n_splits: Number of walk-forward folds.
+        train_weeks: Minimum training window in weeks.
+        test_weeks: Test horizon per fold in weeks.
 
     Returns:
         ComparisonReport. If GBR's MAPE improvement < 5%, the simpler Ridge wins.
     """
-    gbr_report = walk_forward_validate(weekly_df, model_kind="gbr")
-    ridge_report = walk_forward_validate(weekly_df, model_kind="ridge")
+    gbr_report = walk_forward_validate(weekly_df, n_splits=n_splits,
+                                       train_weeks=train_weeks, test_weeks=test_weeks,
+                                       model_kind="gbr")
+    ridge_report = walk_forward_validate(weekly_df, n_splits=n_splits,
+                                         train_weeks=train_weeks, test_weeks=test_weeks,
+                                         model_kind="ridge")
     gbr_mape = gbr_report.mean_metrics.get("mape", 0.0)
     ridge_mape = ridge_report.mean_metrics.get("mape", 0.0)
     improvement_pct = (ridge_mape - gbr_mape) / ridge_mape * 100.0 if ridge_mape > 0 else 0.0

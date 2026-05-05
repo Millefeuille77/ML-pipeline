@@ -49,9 +49,13 @@ def add_derived_features(weekly_df: pd.DataFrame) -> pd.DataFrame:
     frame["region_encoded"] = frame["region"].map(REGION_ENCODING).fillna(1).astype(int)
     if "category" in frame.columns:
         category_avg = frame.groupby("category")["price_unit"].transform("mean")
+        safe_avg = category_avg.replace(0, np.nan)
     else:
-        category_avg = frame["price_unit"].mean()
-    frame["price_vs_category_avg"] = frame["price_unit"] / category_avg.replace(0, np.nan)
+        scalar_avg = float(frame["price_unit"].mean())
+        # WHY: at inference time `recent_data` lacks the `category` column
+        # (it lives in the products table); fall back to series-level mean.
+        safe_avg = scalar_avg if scalar_avg != 0 else np.nan
+    frame["price_vs_category_avg"] = frame["price_unit"] / safe_avg
     frame["price_vs_category_avg"] = frame["price_vs_category_avg"].fillna(1.0)
     frame["stock_to_demand_ratio"] = frame.apply(
         lambda row: safe_divide(row.get("stock_available", 0.0), row.get("rolling_mean_4", 0.0), 0.0),

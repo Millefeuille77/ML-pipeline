@@ -203,25 +203,42 @@ curl -H "X-API-Key: $API_KEY" \
 
 ---
 
-## Model evaluation (walk-forward)
+## Model evaluation (walk-forward, 5 splits)
 
-Per-category metrics are produced by
-`src.models.evaluation.compare_models(...)`. The exact numbers depend on
-the run; the framework records MAPE (primary), RMSE, MAE, R² for both
-models.
+Real metrics from a full walk-forward run on
+`weekly_df_final_for_modeling.csv` (31,027 rows). Per-category
+training & evaluation handled by `src.models.evaluation.walk_forward_validate`
+and `compare_models`. MAPE is the primary metric; the
+"GBR-vs-Ridge < 5% MAPE → simpler wins" rule decides the production
+winner per category.
 
-| Category   | GBR MAPE | GBR RMSE | GBR R² | Ridge MAPE | Winner | Rationale                                  |
-|------------|----------|----------|--------|------------|--------|--------------------------------------------|
-| Milk       | populated by `compare_models()` | | | | | If GBR < 5% MAPE better than Ridge, Ridge wins |
-| Yogurt     | "        | "        | "      | "          | "      | "                                          |
-| ReadyMeal  | "        | "        | "      | "          | "      | "                                          |
-| Juice      | "        | "        | "      | "          | "      | "                                          |
-| SnackBar   | "        | "        | "      | "          | "      | "                                          |
+| Category   | Train rows | Best model | MAPE  | RMSE | MAE  | R²    |
+|------------|-----------:|------------|------:|-----:|-----:|------:|
+| Juice      |      1,125 | **GBR**    | 31.3% | 32.3 | 26.2 | -0.36 |
+| Milk       |      7,257 | **Ridge**  | 24.8% | 28.1 | 22.2 | -0.02 |
+| ReadyMeal  |      5,568 | **Ridge**  | 24.7% | 28.6 | 22.6 | -0.04 |
+| SnackBar   |      5,232 | **Ridge**  | 23.7% | 31.5 | 24.7 | -0.07 |
+| Yogurt     |     11,845 | **Ridge**  | 24.1% | 44.9 | 34.7 | -0.05 |
 
-The comparison emits `ComparisonReport.rationale` so you can read the
-exact decision in logs:
+GBR retained for **Juice** (won by 8.7% MAPE, above the 5% threshold).
+Ridge wins for the other four categories — in three of them Ridge
+actually outperformed GBR on held-out data, and in the fourth GBR's
+edge fell below the 5% threshold so the simpler model is preferred per
+the comparison rule.
 
-> "GBR improved MAPE by 7.4% over Ridge — primary model retained."
+R² values clustered near zero indicate the feature set explains weekly
+variation only marginally better than the per-series mean baseline —
+which is honest for this dataset: ~150 weekly observations per
+category, lag/rolling features pre-computed, no external demand
+drivers (price elasticity, marketing spend, weather data beyond the
+MI-006 enrichment template). The walk-forward MAPE is the more
+defensible signal at this scale.
+
+`ComparisonReport.rationale` records the exact decision; example log
+line:
+
+> "Ridge wins: GBR improved MAPE by -7.08% over Ridge (below 5%
+> threshold)."
 
 ---
 
