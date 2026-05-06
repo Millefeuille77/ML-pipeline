@@ -1,0 +1,23 @@
+# Normalize all text files to LF in the repo; checkout uses platform-native.
+# Silences "LF will be replaced by CRLF" warnings on Windows clients.
+* text=auto eol=lf
+
+# Binary types — never normalize
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.pdf      binary
+*.parquet  binary
+*.joblib   binary
+*.pkl      binary
+*.zip      binary
+*.gz       binary
+*.tar      binary
+
+# Lockfiles / scripts that must keep LF on every platform
+*.sh       text eol=lf
+Dockerfile text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf

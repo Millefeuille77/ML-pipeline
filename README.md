@@ -1,5 +1,9 @@
 # FMCG Demand Forecasting & Product Intelligence Platform
 
+[![CI](https://github.com/USER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/USER/REPO/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
+
 A portfolio-grade Python + SQL + AI/ML system that forecasts weekly SKU
 demand, clusters products by demand behavior, detects supply/demand
 anomalies, and exposes everything via a secured REST API backed by
@@ -154,6 +158,21 @@ uvicorn src.main:app --reload              # http://localhost:8000
 ```bash
 pytest -q
 ```
+
+### Deploy to Google Cloud (Cloud Run + Cloud SQL)
+
+```bash
+gcloud builds submit --config=cloudbuild.yaml \
+  --substitutions=_REGION=us-central1,_SERVICE=fmcg-app, \
+                  _CLOUD_SQL_INSTANCE=$PROJECT:us-central1:fmcg-pg, \
+                  _DB_NAME=fmcg_intelligence,_DB_USER=fmcg_user, \
+                  _IMAGE=us-central1-docker.pkg.dev/$PROJECT/fmcg/app
+```
+
+Full step-by-step in [`docs/deployment_gcp.md`](docs/deployment_gcp.md)
+— covers Cloud SQL provisioning, Secret Manager setup, IAM bindings,
+schema initialization (Cloud Run Job or local proxy), smoke tests, and
+estimated cost (~$10–25/month for the MVP profile).
 
 ### Interactive docs
 

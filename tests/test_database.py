@@ -79,3 +79,53 @@ def test_connection_module_uses_pool_pre_ping() -> None:
     from src.database import connection
     source = (Path(connection.__file__)).read_text(encoding="utf-8")
     assert "pool_pre_ping=True" in source
+
+
+# ---------------- Phase B regression tests ----------------------------------
+
+
+def test_split_sql_statements_yields_first_drop_after_header_comment() -> None:
+    """Phase B1: header `--` comments must NOT swallow the first DROP statement.
+
+    Pre-fix `_split_sql_statements` skipped any chunk whose first stripped line
+    started with `--`, so a script beginning with a header comment would lose
+    its first DROP. After the fix the regex strips line comments globally
+    BEFORE splitting on `;`.
+    """
+    from src.database.init_db import _split_sql_statements
+
+    script = (
+        "-- FMCG schema header comment\n"
+        "-- Idempotent: re-runnable\n"
+        "DROP TABLE IF EXISTS first_table CASCADE;\n"
+        "DROP TABLE IF EXISTS second_table CASCADE;\n"
+        "CREATE TABLE first_table (id INT);\n"
+    )
+    statements = list(_split_sql_statements(script))
+    assert statements, "expected at least one statement after stripping comments"
+    assert statements[0].lstrip().startswith("DROP TABLE"), (
+        f"first non-blank statement should be a DROP, got: {statements[0]!r}"
+    )
+    drop_count = sum(1 for stmt in statements if "DROP TABLE" in stmt)
+    assert drop_count == 2, (
+        f"expected 2 DROP TABLE statements, got {drop_count} — header comment "
+        f"may still be swallowing one"
+    )
+
+
+def test_split_sql_statements_against_real_schema_emits_six_drops() -> None:
+    """Phase B1 (integration): the shipped schema.sql must yield 6 DROPs.
+
+    schema.sql begins with two `--` header lines followed by 6 DROP TABLE
+    statements (one per table). The pre-B1 splitter would have dropped the
+    first of those DROPs, breaking idempotency on re-runs.
+    """
+    from src.database.init_db import _split_sql_statements
+
+    schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
+    statements = list(_split_sql_statements(schema_text))
+    drops = [stmt for stmt in statements if "DROP TABLE" in stmt]
+    assert len(drops) == 6, (
+        f"schema.sql should yield 6 DROP statements but produced {len(drops)}: "
+        f"{[d[:60] for d in drops]}"
+    )

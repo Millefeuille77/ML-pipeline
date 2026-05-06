@@ -424,3 +424,79 @@ def test_safe_compare_constant_time(provided: str, expected: str, want: bool) ->
     from src.api.middleware.auth import _safe_compare
 
     assert _safe_compare(provided, expected) is want
+
+
+# ---------------- Phase B regression tests ----------------------------------
+
+
+def test_category_trends_handles_decimal_units_sold(
+    monkeypatch: pytest.MonkeyPatch, test_api_key: str
+) -> None:
+    """Phase B5: Postgres NUMERIC arrives as `decimal.Decimal` in pandas.
+
+    Pre-fix: `frame.groupby(...)["total_units_sold"].pct_change() * 100.0`
+    raised `TypeError: unsupported operand type(s) for *: 'decimal.Decimal' and
+    'float'` because pct_change preserves Decimal objects.
+
+    Post-fix: column is cast to float before `pct_change`. This test feeds
+    Decimal-valued payloads through the fake DB and asserts a 200 response with
+    numeric `delta_pct` values.
+    """
+    from datetime import date as date_type
+    from decimal import Decimal
+
+    payloads = {
+        "GROUP BY p.category, DATE_TRUNC": [
+            {"category": "Milk",   "month": date_type(2024, 12, 1),
+             "total_units_sold": Decimal("1500.0000")},
+            {"category": "Milk",   "month": date_type(2024, 11, 1),
+             "total_units_sold": Decimal("1200.0000")},
+            {"category": "Yogurt", "month": date_type(2024, 12, 1),
+             "total_units_sold": Decimal("800.0000")},
+            {"category": "Yogurt", "month": date_type(2024, 11, 1),
+             "total_units_sold": Decimal("600.0000")},
+        ],
+    }
+    with _patched_engine(monkeypatch, payloads):
+        client = TestClient(_build_test_app())
+        response = client.get(
+            "/api/v1/analytics/category-trends",
+            params={"months": 2},
+            headers={"X-API-Key": test_api_key},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    assert len(body) == 4
+    # Every row must have a numeric (float / int / None) `delta_pct`. If the
+    # cast were missing, we'd see a 500 from the route's TypeError.
+    for row in body:
+        assert "delta_pct" in row
+        delta = row["delta_pct"]
+        assert delta is None or isinstance(delta, (int, float)), (
+            f"delta_pct should be numeric-or-null, got {delta!r} ({type(delta).__name__})"
+        )
+    # Sanity: the second row in each category (sorted by month asc) is the
+    # later-month value, so its pct_change is non-null. With 1500 vs 1200 the
+    # delta is +25%.
+    milk_rows = [row for row in body if row["category"] == "Milk"]
+    milk_rows.sort(key=lambda row: row["month"])
+    assert milk_rows[0]["delta_pct"] is None  # first row in group has no prior
+    assert milk_rows[1]["delta_pct"] == pytest.approx(25.0, rel=1e-3)
+
+
+def test_category_trends_empty_db_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch, test_api_key: str
+) -> None:
+    """Phase B5 invariant: empty DB still works (early-return short-circuit
+    before the pct_change branch even runs)."""
+    payloads = {"GROUP BY p.category, DATE_TRUNC": []}
+    with _patched_engine(monkeypatch, payloads):
+        client = TestClient(_build_test_app())
+        response = client.get(
+            "/api/v1/analytics/category-trends",
+            params={"months": 6},
+            headers={"X-API-Key": test_api_key},
+        )
+    assert response.status_code == 200
+    assert response.json() == []

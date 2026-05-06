@@ -1,0 +1,68 @@
+# Cloud Build pipeline for the FMCG Demand Forecasting platform.
+# Triggered manually (`gcloud builds submit`) or via a Cloud Build trigger
+# wired to the GitHub repo.
+#
+# Deploys to Cloud Run (region from substitution _REGION) connecting to a
+# Cloud SQL Postgres instance via Unix socket. Secrets are pulled from
+# Secret Manager at deploy time and exposed to the service as env vars.
+#
+# Required substitutions (override via `--substitutions` or trigger config):
+#   _REGION                  e.g. us-central1
+#   _SERVICE                 e.g. fmcg-app
+#   _CLOUD_SQL_INSTANCE      project:region:instance (full connection name)
+#   _DB_NAME                 e.g. fmcg_intelligence
+#   _DB_USER                 e.g. fmcg_user
+#   _IMAGE                   artifact registry path,
+#                            e.g. us-central1-docker.pkg.dev/$PROJECT_ID/fmcg/app
+#
+# Required Secret Manager secrets (created beforehand):
+#   db-password              the DB user's password
+#   api-key                  the X-API-Key value
+#
+# Required IAM:
+#   - Cloud Run service account: roles/cloudsql.client, roles/secretmanager.secretAccessor
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_IMAGE}:${SHORT_SHA}
+      - --tag=${_IMAGE}:latest
+      - --file=Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "${_IMAGE}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --add-cloudsql-instances=${_CLOUD_SQL_INSTANCE}
+      - --set-env-vars=DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},APP_VERSION=${SHORT_SHA}
+      - --set-secrets=DB_PASSWORD=db-password:latest,API_KEY=api-key:latest
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=1Gi
+      - --cpu=1
+      - --min-instances=0
+      - --max-instances=4
+      - --timeout=60
+      - --concurrency=20
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

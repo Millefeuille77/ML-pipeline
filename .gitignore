@@ -52,6 +52,10 @@ logs/
 
 # Build artefacts that should not be committed
 data/processed/*
-data/models/*
 !data/processed/.gitkeep
-!data/models/.gitkeep
+# Trained model artifacts ARE tracked: they're small (~5MB total) and the
+# Cloud Run build bakes them into the image. For production scale, switch
+# to Cloud Storage and pull at startup — see docs/deployment_gcp.md.
+
+# context/dataset/ duplicates data/raw/ — keep one tracked copy
+context/dataset/

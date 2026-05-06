@@ -1,0 +1,40 @@
+# gcloud upload exclusions (mirrors .gitignore plus build-context trims).
+# Keep small: every file uploaded counts against build context size.
+
+# Git itself
+.git/
+.gitignore
+.gitattributes
+
+# Local dev / harness
+.claude/
+.vscode/
+.idea/
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Tests / docs / context — not needed at runtime
+tests/
+docs/
+notebooks/
+context/
+
+# Logs
+*.log
+logs/

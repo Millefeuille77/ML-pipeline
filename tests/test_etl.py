@@ -148,6 +148,73 @@ def test_loader_upsert_is_idempotent(patch_session_scope) -> None:
     assert store[("MI-006",)]["category"] == "Milk"
 
 
+# ---------------- Phase B regression tests ----------------------------------
+
+
+def test_load_weekly_features_casts_bool_holiday_peak_to_int8(
+    sample_weekly_df: pd.DataFrame, monkeypatch
+) -> None:
+    """Phase B2: pandas infers `is_holiday_peak` as bool from CSV but the schema
+    declares SMALLINT. `load_weekly_features` must cast bool to int8 before the
+    bulk insert reaches Postgres.
+
+    Stub `_bulk_insert` to capture the frame the loader passes downstream.
+    """
+    from src.database import init_db
+
+    frame = sample_weekly_df.copy()
+    frame["is_holiday_peak"] = frame["is_holiday_peak"].astype(bool)
+    assert frame["is_holiday_peak"].dtype == bool, "fixture precondition"
+
+    captured: dict[str, pd.DataFrame] = {}
+
+    def _stub_bulk_insert(table: str, frame_in: pd.DataFrame, conflict_cols) -> int:
+        captured["table"] = table
+        captured["frame"] = frame_in.copy()
+        return len(frame_in)
+
+    monkeypatch.setattr(init_db, "_bulk_insert", _stub_bulk_insert, raising=True)
+    init_db.load_weekly_features(frame)
+
+    assert captured["table"] == "weekly_features"
+    written = captured["frame"]
+    assert "is_holiday_peak" in written.columns
+    assert written["is_holiday_peak"].dtype == "int8", (
+        f"expected int8 cast for SMALLINT column, got {written['is_holiday_peak'].dtype}"
+    )
+    # Cast must preserve values (False -> 0, True -> 1)
+    assert set(written["is_holiday_peak"].unique()).issubset({0, 1})
+
+
+def test_load_weekly_features_leaves_non_bool_holiday_peak_alone(
+    sample_weekly_df: pd.DataFrame, monkeypatch
+) -> None:
+    """Phase B2: when `is_holiday_peak` is already integer the loader must not
+    re-cast (preserves dtype rather than churning).
+
+    The branch guard reads `dtype == bool` — anything else falls through.
+    """
+    from src.database import init_db
+
+    frame = sample_weekly_df.copy()
+    frame["is_holiday_peak"] = frame["is_holiday_peak"].astype("int64")
+    assert frame["is_holiday_peak"].dtype == "int64", "fixture precondition"
+
+    captured: dict[str, pd.DataFrame] = {}
+
+    def _stub_bulk_insert(table: str, frame_in: pd.DataFrame, conflict_cols) -> int:
+        captured["frame"] = frame_in.copy()
+        return len(frame_in)
+
+    monkeypatch.setattr(init_db, "_bulk_insert", _stub_bulk_insert, raising=True)
+    init_db.load_weekly_features(frame)
+
+    written = captured["frame"]
+    assert written["is_holiday_peak"].dtype == "int64", (
+        f"int64 should be preserved, got {written['is_holiday_peak'].dtype}"
+    )
+
+
 def test_pipeline_resolve_within_rejects_path_traversal(tmp_path: Path, monkeypatch) -> None:
     """`run_batch_pipeline` must refuse `../` or absolute paths outside RAW_DATA_DIR."""
     from src.etl import pipeline

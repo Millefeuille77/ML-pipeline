@@ -1,0 +1,38 @@
+{
+  "name": "forecaster_yogurt",
+  "version": 1,
+  "metrics": {
+    "mape": 29.168554276691477,
+    "rmse": 39.803213663678676,
+    "mae": 30.673348664416647,
+    "r2": 0.35466796509678344
+  },
+  "features": [
+    "lag_1",
+    "lag_2",
+    "rolling_mean_4",
+    "rolling_std_4",
+    "momentum",
+    "is_holiday_peak",
+    "is_holiday_week",
+    "is_summer",
+    "is_winter",
+    "week_number",
+    "month",
+    "year",
+    "sku_age",
+    "promotion_flag",
+    "price_unit",
+    "delivery_days",
+    "stock_available",
+    "lifecycle_encoded",
+    "channel_encoded",
+    "region_encoded",
+    "price_vs_category_avg",
+    "stock_to_demand_ratio",
+    "promo_lag_1"
+  ],
+  "training_rows": 11845,
+  "category": "Yogurt",
+  "created_at": "20260505-175611"
+}

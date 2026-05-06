@@ -1,0 +1,38 @@
+{
+  "name": "forecaster_juice",
+  "version": 1,
+  "metrics": {
+    "mape": 18.58504564559652,
+    "rmse": 20.78686521879465,
+    "mae": 16.096834486420484,
+    "r2": 0.7154029517695137
+  },
+  "features": [
+    "lag_1",
+    "lag_2",
+    "rolling_mean_4",
+    "rolling_std_4",
+    "momentum",
+    "is_holiday_peak",
+    "is_holiday_week",
+    "is_summer",
+    "is_winter",
+    "week_number",
+    "month",
+    "year",
+    "sku_age",
+    "promotion_flag",
+    "price_unit",
+    "delivery_days",
+    "stock_available",
+    "lifecycle_encoded",
+    "channel_encoded",
+    "region_encoded",
+    "price_vs_category_avg",
+    "stock_to_demand_ratio",
+    "promo_lag_1"
+  ],
+  "training_rows": 1125,
+  "category": "Juice",
+  "created_at": "20260505-174928"
+}

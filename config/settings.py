@@ -76,10 +76,24 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         """Return SQLAlchemy-compatible psycopg2 URL.
 
+        Switches between TCP and Unix-socket formats based on `db_host`:
+        - Unix socket (Cloud SQL on Cloud Run, App Engine):
+          `postgresql+psycopg2://user:pass@/db?host=/cloudsql/<conn-name>`
+        - TCP (local Docker, GCE, anywhere with a routable IP):
+          `postgresql+psycopg2://user:pass@host:port/db`
+
         Returns:
-            URL of the form `postgresql+psycopg2://user:pass@host:port/db`.
+            URL of the appropriate form.
         """
         password = self.db_password.get_secret_value()
+        if self.db_host.startswith("/"):
+            # WHY: Cloud SQL on serverless GCP services exposes Postgres via a
+            # Unix-domain socket; psycopg2 wants the socket dir in the query
+            # string and an empty host between '@' and '/'.
+            return (
+                f"postgresql+psycopg2://{self.db_user}:{password}"
+                f"@/{self.db_name}?host={self.db_host}"
+            )
         return (
             f"postgresql+psycopg2://{self.db_user}:{password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"

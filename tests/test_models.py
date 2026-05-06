@@ -456,6 +456,149 @@ def test_anomaly_demand_drop_detected(make_weekly_row) -> None:
     assert drops[0].severity == "MEDIUM"
 
 
+# ---------------- Phase B regression tests ----------------------------------
+
+
+def test_save_model_does_not_collide_with_reserved_logrecord_name(
+    temp_model_dir: Path,
+) -> None:
+    """Phase B3: `save_model` previously passed `extra={"name": ...}` which
+    collides with `LogRecord.name` and raises `KeyError("Attempt to overwrite
+    'name' in LogRecord")` whenever the root logger has any handler attached.
+
+    This test attaches a real handler to the root so `Logger.makeRecord` is
+    exercised, then calls `save_model`. Pre-fix this would crash with KeyError;
+    post-fix the artifact must land on disk and the call must return a
+    populated `ModelInfo`.
+    """
+    import logging
+    from io import StringIO
+
+    captured = StringIO()
+    handler = logging.StreamHandler(captured)
+    handler.setLevel(logging.INFO)
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    try:
+        info = registry.save_model(
+            {"weights": [0.1, 0.2]},
+            "phase_b_collision_test",
+            {"mape": 1.0},
+            ["feature_a"],
+            training_rows=10,
+            category="Milk",
+        )
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+    assert info.name == "phase_b_collision_test"
+    assert info.path.exists(), "joblib artifact must be written to disk"
+    assert info.metadata_path.exists(), "metadata JSON must be written"
+    # Sanity: the call really did emit a log line via the configured handler.
+    handler.flush()
+
+
+def test_save_model_extras_avoid_all_reserved_logrecord_keys(
+    temp_model_dir: Path,
+) -> None:
+    """Phase B3 (defense in depth): scan the registry source for any reserved
+    LogRecord key sneaking back into `extra=` dicts. If a future edit
+    re-introduces `"name"` or any reserved key the test fails loudly.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    reserved = {
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "created", "msecs", "relativeCreated", "thread", "threadName",
+        "processName", "process", "message", "asctime",
+    }
+    source = _Path(registry.__file__).read_text(encoding="utf-8")
+    extras = re.findall(r"extra=\{([^}]*)\}", source)
+    for extra_block in extras:
+        keys = re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', extra_block)
+        offenders = [key for key in keys if key in reserved]
+        assert not offenders, (
+            f"reserved LogRecord keys leaked into registry logger extras: "
+            f"{offenders!r} in block {extra_block!r}"
+        )
+
+
+def test_add_derived_features_handles_missing_category_column(
+    sample_weekly_df: pd.DataFrame,
+) -> None:
+    """Phase B4: at inference time `recent_data` lacks `category` (lives in
+    products table). `add_derived_features` previously called
+    `category_avg.replace(0, np.nan)` on a scalar from `frame["price_unit"].mean()`
+    which has no `.replace` method, raising AttributeError.
+
+    With the scalar/Series branch fix the function must return a frame with the
+    `price_vs_category_avg` column populated and not crash.
+    """
+    from src.models.feature_engineering import add_derived_features
+
+    frame = sample_weekly_df.copy().drop(columns=["category"])
+    assert "category" not in frame.columns, "precondition for inference path"
+
+    out = add_derived_features(frame)
+    assert "price_vs_category_avg" in out.columns
+    assert not out["price_vs_category_avg"].isna().any()
+    # When all price_unit values are equal (10.0 in fixture) ratio == 1.0
+    assert out["price_vs_category_avg"].to_list() == pytest.approx([1.0] * len(out))
+
+
+def test_add_derived_features_scalar_branch_handles_zero_average() -> None:
+    """Phase B4 corner case: when `price_unit` is uniformly zero the scalar
+    branch must fall back to NaN (then fillna(1.0)) rather than dividing by 0.
+
+    Pre-fix the only branch was `Series.replace(0, np.nan)` which would have
+    crashed on a scalar. The new branch checks `if avg == 0`.
+    """
+    import pandas as pd
+    from src.models.feature_engineering import add_derived_features
+
+    frame = pd.DataFrame(
+        [
+            {
+                "sku": "MI-006", "channel": "Retail", "region": "PL-Central",
+                "week": pd.Timestamp("2024-01-01").date(),
+                "units_sold": 0.0, "stock_available": 0.0, "promotion_flag": 0,
+                "price_unit": 0.0, "delivery_days": 2.0, "is_holiday_peak": 0,
+                "week_number": 1, "month": 1, "year": 2024,
+                "is_holiday_week": 0, "is_summer": 0, "is_winter": 1,
+                "sku_age": 100, "lifecycle_stage": "Mature",
+                "lag_1": 0.0, "lag_2": 0.0, "rolling_mean_4": 0.0,
+                "rolling_std_4": 0.0, "momentum": 0.0,
+            }
+        ]
+    )
+    out = add_derived_features(frame)
+    assert "price_vs_category_avg" in out.columns
+    # 0 / NaN → NaN → fillna(1.0)
+    assert out["price_vs_category_avg"].iloc[0] == pytest.approx(1.0)
+
+
+def test_add_derived_features_series_branch_unchanged_with_category(
+    synthetic_training_df: pd.DataFrame,
+) -> None:
+    """Phase B4 invariant: when `category` IS present the function must use the
+    per-category mean (Series path), unchanged from before B4.
+    """
+    from src.models.feature_engineering import add_derived_features
+
+    frame = synthetic_training_df.head(50).copy()
+    assert "category" in frame.columns
+    out = add_derived_features(frame)
+    assert "price_vs_category_avg" in out.columns
+    # All fixture rows in synthetic data share price_unit=10.0 so within a
+    # category the ratio is exactly 1.0
+    assert out["price_vs_category_avg"].to_list() == pytest.approx([1.0] * len(out))
+
+
 def test_anomaly_price_change_detected(make_weekly_row) -> None:
     """Price > 15% off the 4-week rolling avg yields a LOW price_anomaly alert."""
     rows = [

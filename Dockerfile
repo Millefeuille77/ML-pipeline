@@ -37,15 +37,17 @@ COPY --from=builder /install /usr/local
 COPY --chown=app:app config ./config
 COPY --chown=app:app src ./src
 COPY --chown=app:app data/raw ./data/raw
+COPY --chown=app:app data/models ./data/models
 
-RUN mkdir -p /app/data/processed /app/data/models \
+RUN mkdir -p /app/data/processed \
     && chown -R app:app /app/data
 
 USER app
 
 EXPOSE 8000
 
+# WHY: Cloud Run injects $PORT at runtime; local Docker uses 8000.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl --fail --silent http://localhost:8000/api/v1/health || exit 1
+    CMD curl --fail --silent "http://localhost:${PORT:-8000}/api/v1/health" || exit 1
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
