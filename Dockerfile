@@ -36,6 +36,7 @@ COPY --from=builder /install /usr/local
 
 COPY --chown=app:app config ./config
 COPY --chown=app:app src ./src
+COPY --chown=app:app scripts ./scripts
 COPY --chown=app:app data/raw ./data/raw
 COPY --chown=app:app data/models ./data/models
 

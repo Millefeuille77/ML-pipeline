@@ -1,0 +1,132 @@
+{
+  "name": "forecaster_yogurt",
+  "version": 3,
+  "metrics": {
+    "mape": 24.08961397709304,
+    "rmse": 44.86544422559088,
+    "mae": 34.69495587604196,
+    "r2": -0.05380546152557666
+  },
+  "features": [
+    "lag_1",
+    "lag_2",
+    "rolling_mean_4",
+    "rolling_std_4",
+    "momentum",
+    "is_holiday_peak",
+    "is_holiday_week",
+    "is_summer",
+    "is_winter",
+    "week_number",
+    "month",
+    "year",
+    "sku_age",
+    "promotion_flag",
+    "price_unit",
+    "delivery_days",
+    "stock_available",
+    "lifecycle_encoded",
+    "channel_encoded",
+    "region_encoded",
+    "price_vs_category_avg",
+    "stock_to_demand_ratio",
+    "promo_lag_1"
+  ],
+  "training_rows": 12241,
+  "category": "Yogurt",
+  "created_at": "20260506-145057",
+  "feature_baselines": {
+    "lag_1": {
+      "mean": 128.3634023200719,
+      "std": 48.32110672827917
+    },
+    "lag_2": {
+      "mean": 128.61179542521035,
+      "std": 48.20125224028955
+    },
+    "rolling_mean_4": {
+      "mean": 128.55284051139614,
+      "std": 36.347414444123565
+    },
+    "rolling_std_4": {
+      "mean": 32.458643738256676,
+      "std": 17.130113978984166
+    },
+    "momentum": {
+      "mean": -0.24839303161506412,
+      "std": 51.30265022311745
+    },
+    "is_holiday_peak": {
+      "mean": 0.10734417122784086,
+      "std": 0.309562963994421
+    },
+    "is_holiday_week": {
+      "mean": 0.11338942896822155,
+      "std": 0.3170811880054334
+    },
+    "is_summer": {
+      "mean": 0.2588023854260273,
+      "std": 0.43799472895871294
+    },
+    "is_winter": {
+      "mean": 0.24818233804427742,
+      "std": 0.4319758201957391
+    },
+    "week_number": {
+      "mean": 27.7616207826158,
+      "std": 15.112244552417248
+    },
+    "month": {
+      "mean": 6.81014622988318,
+      "std": 3.454806018766884
+    },
+    "year": {
+      "mean": 2023.3175394167142,
+      "std": 0.7641221781921937
+    },
+    "sku_age": {
+      "mean": 67.31116738828527,
+      "std": 38.72076143740361
+    },
+    "promotion_flag": {
+      "mean": 0.6105710317784495,
+      "std": 0.48764072114178025
+    },
+    "price_unit": {
+      "mean": 5.2607658361244996,
+      "std": 0.885707678994667
+    },
+    "delivery_days": {
+      "mean": 3.006978759905236,
+      "std": 0.5812764497093702
+    },
+    "stock_available": {
+      "mean": 157.6325197369496,
+      "std": 21.415423292582144
+    },
+    "lifecycle_encoded": {
+      "mean": 0.468425782207336,
+      "std": 0.6276607783521516
+    },
+    "channel_encoded": {
+      "mean": 0.9997549219834981,
+      "std": 0.8165465730409566
+    },
+    "region_encoded": {
+      "mean": 1.0001633853443346,
+      "std": 0.8164965645792486
+    },
+    "price_vs_category_avg": {
+      "mean": 1.0000000000000002,
+      "std": 0.16836097758100366
+    },
+    "stock_to_demand_ratio": {
+      "mean": 1.3282928812636923,
+      "std": 0.426131382501072
+    },
+    "promo_lag_1": {
+      "mean": 0.6085287149742669,
+      "std": 0.48809935522222997
+    }
+  }
+}

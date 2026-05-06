@@ -1,12 +1,16 @@
 """Forecast endpoints."""
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Final
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Path as FastAPIPath, Query, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import Path as FastAPIPath
+from fastapi import Query, Request, status
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.settings import get_settings
 from src.api.schemas import (
@@ -16,7 +20,7 @@ from src.api.schemas import (
     ForecastResult,
     Region,
 )
-from src.database.connection import get_engine
+from src.database.connection import get_engine, session_scope
 from src.etl.pipeline import run_batch_pipeline
 from src.models.forecaster import predict_horizon
 from src.models.registry import ModelInfo, get_model
@@ -73,8 +77,60 @@ def _resolve_category(sku: str) -> str:
     return str(row[0])
 
 
+def _write_prediction_log(request_id: str, forecast: ForecastResult) -> None:
+    """Persist forecast points to prediction_log; failure is silent (logged only).
+
+    Args:
+        request_id: Correlation ID for the originating HTTP request.
+        forecast: Completed ForecastResult to log.
+    """
+    rows = [
+        {
+            "request_id": request_id,
+            "sku": forecast.sku,
+            "channel": forecast.channel,
+            "region": forecast.region,
+            "forecast_week": week,
+            "predicted_units": predicted,
+            "confidence_lower": lower,
+            "confidence_upper": upper,
+            "model_version": forecast.model_version,
+        }
+        for week, predicted, lower, upper in zip(
+            forecast.weeks,
+            forecast.predicted_units,
+            forecast.confidence_lower,
+            forecast.confidence_upper,
+        )
+    ]
+    if not rows:
+        return
+    sql = text(
+        "INSERT INTO prediction_log "
+        "(request_id, sku, channel, region, forecast_week, predicted_units, "
+        "confidence_lower, confidence_upper, model_version) "
+        "VALUES (:request_id, :sku, :channel, :region, :forecast_week, "
+        ":predicted_units, :confidence_lower, :confidence_upper, :model_version) "
+        "ON CONFLICT (request_id, sku, channel, region, forecast_week) DO NOTHING"
+    )
+    try:
+        with session_scope() as session:
+            session.execute(sql, rows)
+        logger.info(
+            "prediction_log_written",
+            extra={"request_id": request_id, "sku": forecast.sku, "rows": len(rows)},
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "prediction_log_write_failed",
+            extra={"request_id": request_id, "sku": forecast.sku},
+        )
+
+
 @router.get("/{sku}", response_model=ForecastResult)
 def forecast_sku(
+    request: Request,
+    background_tasks: BackgroundTasks,
     sku: Annotated[str, FastAPIPath(pattern=SKU_PATTERN.pattern, min_length=6, max_length=6)],
     channel: Annotated[Channel, Query(description="Sales channel")],
     region: Annotated[Region, Query(description="Geographic region")],
@@ -91,11 +147,15 @@ def forecast_sku(
     bundle, info = _safe_get_model(category)
     forecast = predict_horizon(bundle, sku, channel, region, history, horizon_weeks)
     forecast.model_version = f"{info.name}_v{info.version}"
+    request_id = getattr(request.state, "correlation_id", None) or uuid.uuid4().hex
+    background_tasks.add_task(_write_prediction_log, request_id, forecast)
     return forecast
 
 
 @router.get("/category/{category}", response_model=list[ForecastResult])
 def forecast_category(
+    request: Request,
+    background_tasks: BackgroundTasks,
     category: Annotated[Category, FastAPIPath(description="Product category")],
     channel: Annotated[Channel, Query(description="Sales channel")],
     region: Annotated[Region, Query(description="Geographic region")],
@@ -112,6 +172,7 @@ def forecast_category(
                 {"category": category},
             ).fetchall()
         ]
+    request_id = getattr(request.state, "correlation_id", None) or uuid.uuid4().hex
     results: list[ForecastResult] = []
     for sku in skus:
         history = _load_recent_history(sku, channel, region)
@@ -119,6 +180,7 @@ def forecast_category(
             continue
         forecast = predict_horizon(bundle, sku, channel, region, history, horizon_weeks)
         forecast.model_version = f"{info.name}_v{info.version}"
+        background_tasks.add_task(_write_prediction_log, request_id, forecast)
         results.append(forecast)
     return results
 

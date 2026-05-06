@@ -113,19 +113,56 @@ def test_split_sql_statements_yields_first_drop_after_header_comment() -> None:
     )
 
 
-def test_split_sql_statements_against_real_schema_emits_six_drops() -> None:
-    """Phase B1 (integration): the shipped schema.sql must yield 6 DROPs.
+def test_split_sql_statements_against_real_schema_emits_drops_for_every_table() -> None:
+    """Phase B1 (integration): the shipped schema.sql must yield one DROP per CREATE.
 
-    schema.sql begins with two `--` header lines followed by 6 DROP TABLE
-    statements (one per table). The pre-B1 splitter would have dropped the
-    first of those DROPs, breaking idempotency on re-runs.
+    Rather than hardcode a count (which goes stale every time a table is added —
+    Phase D added 3 tables, taking the schema from 6 to 9), this test derives the
+    expected count directly from the same script: it must equal the number of
+    `CREATE TABLE` statements. The pre-B1 splitter would have dropped the first
+    of those DROPs, breaking idempotency on re-runs.
     """
+    import re as _re
+
     from src.database.init_db import _split_sql_statements
 
     schema_text = SCHEMA_PATH.read_text(encoding="utf-8")
     statements = list(_split_sql_statements(schema_text))
-    drops = [stmt for stmt in statements if "DROP TABLE" in stmt]
-    assert len(drops) == 6, (
-        f"schema.sql should yield 6 DROP statements but produced {len(drops)}: "
-        f"{[d[:60] for d in drops]}"
+    drops = [stmt for stmt in statements if stmt.lstrip().startswith("DROP TABLE")]
+    creates = [stmt for stmt in statements if _re.match(r"^\s*CREATE TABLE\s", stmt)]
+    assert len(drops) == len(creates), (
+        f"every CREATE TABLE must have a matching DROP TABLE; got "
+        f"{len(drops)} DROPs vs {len(creates)} CREATEs: "
+        f"creates={[c.split('(')[0].strip()[:60] for c in creates]}"
     )
+
+    drop_names = [
+        _re.search(r"DROP TABLE IF EXISTS\s+(\w+)", stmt).group(1)
+        for stmt in drops
+    ]
+    create_names = [
+        _re.search(r"CREATE TABLE\s+(\w+)", stmt).group(1)
+        for stmt in creates
+    ]
+    assert set(drop_names) == set(create_names), (
+        f"DROP / CREATE name sets must match: drops={sorted(drop_names)} "
+        f"creates={sorted(create_names)}"
+    )
+
+    drop_full_positions: dict[str, int] = {}
+    create_full_positions: dict[str, int] = {}
+    for full_idx, stmt in enumerate(statements):
+        drop_match = _re.search(r"DROP TABLE IF EXISTS\s+(\w+)", stmt)
+        if drop_match and stmt.lstrip().startswith("DROP TABLE"):
+            drop_full_positions[drop_match.group(1)] = full_idx
+            continue
+        create_match = _re.match(r"^\s*CREATE TABLE\s+(\w+)", stmt)
+        if create_match:
+            create_full_positions[create_match.group(1)] = full_idx
+    for name in drop_names:
+        drop_idx = drop_full_positions[name]
+        create_idx = create_full_positions[name]
+        assert drop_idx < create_idx, (
+            f"DROP for {name!r} must precede its CREATE in the script "
+            f"(found DROP at {drop_idx}, CREATE at {create_idx})"
+        )

@@ -200,6 +200,9 @@ class HealthResponse(BaseModel):
     uptime_seconds: float = Field(..., ge=0.0)
     version: str
     row_counts: dict[str, int]
+    days_since_last_retrain: int | None = None
+    live_mape_by_category: dict[str, float] = Field(default_factory=dict)
+    stale_model_warning: list[str] = Field(default_factory=list)
 
 
 class SalesSummary(BaseModel):

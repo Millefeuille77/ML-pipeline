@@ -2,6 +2,9 @@
 -- PostgreSQL schema. Idempotent: re-runnable via init_db.
 
 -- Drop in reverse-FK order so re-creation is safe.
+DROP TABLE IF EXISTS model_performance_live CASCADE;
+DROP TABLE IF EXISTS model_lineage CASCADE;
+DROP TABLE IF EXISTS prediction_log CASCADE;
 DROP TABLE IF EXISTS batch_predictions CASCADE;
 DROP TABLE IF EXISTS demand_forecasts CASCADE;
 DROP TABLE IF EXISTS enrichment_features CASCADE;
@@ -166,3 +169,65 @@ COMMENT ON TABLE batch_predictions IS
     'Predictions produced by run_batch_pipeline (parquet-driven weekly batches).';
 CREATE INDEX IF NOT EXISTS idx_batch_predictions_batch ON batch_predictions (batch_id);
 CREATE INDEX IF NOT EXISTS idx_batch_predictions_sku ON batch_predictions (sku);
+
+CREATE TABLE prediction_log (
+    id                  BIGSERIAL PRIMARY KEY,
+    request_id          VARCHAR(64) NOT NULL,
+    sku                 VARCHAR(8) NOT NULL REFERENCES products(sku) ON DELETE CASCADE,
+    channel             VARCHAR(16) NOT NULL,
+    region              VARCHAR(16) NOT NULL,
+    forecast_week       DATE NOT NULL,
+    predicted_units     NUMERIC(14,4) NOT NULL,
+    confidence_lower    NUMERIC(14,4) NOT NULL,
+    confidence_upper    NUMERIC(14,4) NOT NULL,
+    model_version       VARCHAR(64) NOT NULL,
+    served_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    actual_units        NUMERIC(14,4),
+    scored_at           TIMESTAMPTZ,
+    CONSTRAINT prediction_log_unique UNIQUE (request_id, sku, channel, region, forecast_week),
+    CONSTRAINT prediction_log_channel_valid CHECK (channel IN ('Retail','Discount','E-commerce')),
+    CONSTRAINT prediction_log_region_valid CHECK (region IN ('PL-Central','PL-North','PL-South'))
+);
+COMMENT ON TABLE prediction_log IS 'Every served forecast point. actual_units backfilled by score_predictions.py.';
+CREATE INDEX IF NOT EXISTS idx_prediction_log_forecast_week ON prediction_log (forecast_week);
+CREATE INDEX IF NOT EXISTS idx_prediction_log_model_version ON prediction_log (model_version);
+CREATE INDEX IF NOT EXISTS idx_prediction_log_unscored ON prediction_log (forecast_week) WHERE scored_at IS NULL;
+
+CREATE TABLE model_lineage (
+    id                  BIGSERIAL PRIMARY KEY,
+    run_id              VARCHAR(64) NOT NULL UNIQUE,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    category            VARCHAR(32) NOT NULL,
+    model_version       VARCHAR(64) NOT NULL,
+    data_hash           VARCHAR(64) NOT NULL,
+    training_rows       INTEGER NOT NULL,
+    train_mape          NUMERIC(10,6),
+    train_rmse          NUMERIC(14,6),
+    train_mae           NUMERIC(14,6),
+    train_r2            NUMERIC(10,6),
+    incumbent_version   VARCHAR(64),
+    incumbent_mape      NUMERIC(10,6),
+    promotion_decision  VARCHAR(16) NOT NULL,
+    drift_warnings      JSONB,
+    notes               TEXT,
+    CONSTRAINT model_lineage_decision_valid CHECK (
+        promotion_decision IN ('promoted','rejected','no_incumbent')
+    )
+);
+COMMENT ON TABLE model_lineage IS 'Audit trail for retraining runs. ml-engineer writes after each compare.';
+CREATE INDEX IF NOT EXISTS idx_model_lineage_category ON model_lineage (category);
+
+CREATE TABLE model_performance_live (
+    id                  BIGSERIAL PRIMARY KEY,
+    scored_date         DATE NOT NULL,
+    model_version       VARCHAR(64) NOT NULL,
+    category            VARCHAR(32) NOT NULL,
+    samples             INTEGER NOT NULL,
+    live_mape           NUMERIC(10,6) NOT NULL,
+    live_rmse           NUMERIC(14,6) NOT NULL,
+    live_mae            NUMERIC(14,6) NOT NULL,
+    CONSTRAINT performance_live_unique UNIQUE (scored_date, model_version, category)
+);
+COMMENT ON TABLE model_performance_live IS 'Daily live MAPE per (model_version, category).';
+CREATE INDEX IF NOT EXISTS idx_perf_live_date ON model_performance_live (scored_date);

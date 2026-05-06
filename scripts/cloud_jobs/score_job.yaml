@@ -1,0 +1,66 @@
+# Cloud Run Job definition for the daily scoring pipeline.
+#
+# This is a Job (not a Service) — it runs to completion and exits.
+# It is NOT scheduled here; scheduling is done in scheduler.gcloud.sh via
+# Cloud Scheduler. The job is invoked via HTTP POST to the Cloud Run Jobs API.
+#
+# Required substitutions before applying (replace angle-bracket placeholders):
+#   <PROJECT_ID>          GCP project ID
+#   <REGION>              Cloud Run region, e.g. us-central1
+#   <IMAGE>               Artifact Registry image path,
+#                         e.g. us-central1-docker.pkg.dev/<PROJECT_ID>/fmcg/app:latest
+#   <CLOUD_SQL_INSTANCE>  Full connection name: project:region:instance
+#   <DB_NAME>             e.g. fmcg_intelligence
+#   <DB_USER>             e.g. fmcg_user
+#
+# Apply with:
+#   gcloud run jobs replace scripts/cloud_jobs/score_job.yaml --region=<REGION>
+#
+# The Cloud SQL proxy sidecar is handled automatically by the
+# --add-cloudsql-instances flag (emulated here as the sql-connection-name annotation).
+# Secrets are bound from Secret Manager; the service account must have
+# roles/cloudsql.client and roles/secretmanager.secretAccessor.
+
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: fmcg-score
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/cloudsql-instances: <PROJECT_ID>:<REGION>:<CLOUD_SQL_INSTANCE>
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          maxRetries: 1
+          timeoutSeconds: 300
+          containers:
+            - image: <IMAGE>
+              command: ["python", "-m", "scripts.score_predictions"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              env:
+                - name: DB_HOST
+                  value: /cloudsql/<PROJECT_ID>:<REGION>:<CLOUD_SQL_INSTANCE>
+                - name: DB_NAME
+                  value: <DB_NAME>
+                - name: DB_USER
+                  value: <DB_USER>
+                - name: APP_VERSION
+                  value: "1.0.0"
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-password
+                      key: latest
+                - name: API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: api-key
+                      key: latest

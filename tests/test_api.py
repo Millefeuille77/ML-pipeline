@@ -24,7 +24,11 @@ class _FakeResult:
         self._payload = payload
 
     def scalar(self) -> Any:
-        if isinstance(self._payload, list) and self._payload:
+        if isinstance(self._payload, list):
+            if not self._payload:
+                # WHY: real Postgres returns None from `MAX(...)` / `SELECT ...`
+                # against an empty table. Empty list payload mirrors that.
+                return None
             first = self._payload[0]
             return first[0] if isinstance(first, tuple) else first
         return self._payload
@@ -120,15 +124,37 @@ def _build_test_app() -> FastAPI:
 
 @pytest.fixture
 def fake_health_payloads():
-    """Canned DB responses for the health endpoint."""
+    """Canned DB responses for the health endpoint.
+
+    Phase D additions: prediction_log / model_lineage / model_performance_live
+    row counts plus the three helper queries (MAX(completed_at), live MAPE
+    aggregation, stale-model lookup) all map onto empty payloads. The
+    `_FakeResult.scalar()` empty-list short-circuit returns None, mirroring
+    real Postgres behavior on empty tables, so the route helpers must take
+    their default branches and produce safe defaults.
+    """
+    # WHY: dict iteration order is insertion order, and `_FakeConnection.execute`
+    # returns the first matching fragment. More specific fragments must come
+    # before generic table-name fragments so the wrong query doesn't grab the
+    # wrong canned payload. The Phase D helpers query MAX/AVG/DISTINCT on
+    # tables that ALSO have a COUNT(*) row in the fixture.
     return {
         "SELECT 1": [(1,)],
+        # Phase D MAX(completed_at) → None scalar (empty table).
+        "MAX(completed_at) FROM model_lineage": [],
+        # Phase D AVG(live_mape) GROUP BY category → empty rows.
+        "AVG(live_mape)": [],
+        # Phase D stale-model lookup — empty rows → empty list.
+        "WHERE category NOT IN": [],
         "FROM products": [(30,)],
         "FROM daily_sales": [(190757,)],
         "FROM weekly_features": [(31027,)],
         "FROM enrichment_features": [(1349,)],
         "FROM demand_forecasts": [(0,)],
         "FROM batch_predictions": [(0,)],
+        "FROM prediction_log": [(0,)],
+        "FROM model_lineage": [(0,)],
+        "FROM model_performance_live": [(0,)],
     }
 
 
@@ -500,3 +526,218 @@ def test_category_trends_empty_db_returns_empty_list(
         )
     assert response.status_code == 200
     assert response.json() == []
+
+
+# =================== Phase D regression tests ==============================
+
+
+def _stub_forecast_dependencies(monkeypatch, *, horizon_weeks: int = 4):
+    """Patch forecast-route helpers and return the deterministic ForecastResult
+    that the route will hand the BackgroundTask.
+
+    Centralizing the stub keeps the Phase D tests readable and lets each
+    individual test override only what it cares about (e.g. the session_scope
+    side-effect for failure / idempotency cases).
+    """
+    from datetime import date as date_type
+    from src.api import schemas
+    from src.api.routes import forecast as forecast_route
+
+    weeks = [date_type(2025, 1, 6 + 7 * i) for i in range(horizon_weeks)]
+    deterministic = schemas.ForecastResult(
+        sku="MI-006",
+        channel="Retail",
+        region="PL-Central",
+        weeks=weeks,
+        predicted_units=[100.0 + i for i in range(horizon_weeks)],
+        confidence_lower=[90.0 + i for i in range(horizon_weeks)],
+        confidence_upper=[110.0 + i for i in range(horizon_weeks)],
+        model_version="forecaster_milk_v1",
+    )
+
+    class _StubInfo:
+        name = "forecaster_milk"
+        version = 1
+
+    import pandas as _pd
+    monkeypatch.setattr(forecast_route, "_resolve_category",
+                        lambda sku: "Milk", raising=True)
+    monkeypatch.setattr(
+        forecast_route, "_load_recent_history",
+        lambda sku, channel, region: _pd.DataFrame(
+            [{"week": date_type(2024, 12, 30), "units_sold": 100.0}]
+        ),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        forecast_route, "_safe_get_model",
+        lambda category: (object(), _StubInfo()), raising=True,
+    )
+    monkeypatch.setattr(
+        forecast_route, "predict_horizon",
+        lambda bundle, sku, channel, region, history, horizon: deterministic,
+        raising=True,
+    )
+    return deterministic, forecast_route
+
+
+class _CapturingSession:
+    """Records every session.execute(payload) call without raising."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    def execute(self, _stmt, payload):
+        if isinstance(payload, list):
+            self.calls.append(payload)
+        elif isinstance(payload, dict):
+            self.calls.append([payload])
+        return self
+
+    def commit(self) -> None:  # pragma: no cover
+        pass
+
+    def rollback(self) -> None:  # pragma: no cover
+        pass
+
+    def close(self) -> None:  # pragma: no cover
+        pass
+
+
+def _install_capturing_session(monkeypatch, target_module) -> _CapturingSession:
+    """Replace `session_scope` inside `target_module` with a context manager
+    yielding a single shared `_CapturingSession`. Returns the session so the
+    caller can inspect `.calls`.
+    """
+    from contextlib import contextmanager
+
+    captured = _CapturingSession()
+
+    @contextmanager
+    def _scope():
+        yield captured
+
+    monkeypatch.setattr(target_module, "session_scope", _scope, raising=True)
+    return captured
+
+
+def test_forecast_route_writes_prediction_log_on_200(
+    monkeypatch, test_api_key
+) -> None:
+    """A successful /forecast must enqueue exactly `horizon_weeks` rows
+    into prediction_log via a BackgroundTask. Default horizon is 4."""
+    _, forecast_route = _stub_forecast_dependencies(monkeypatch, horizon_weeks=4)
+    captured = _install_capturing_session(monkeypatch, forecast_route)
+
+    with _patched_engine(monkeypatch, {}):
+        client = TestClient(_build_test_app())
+        response = client.get(
+            "/api/v1/forecast/MI-006",
+            params={"channel": "Retail", "region": "PL-Central", "horizon_weeks": 4},
+            headers={"X-API-Key": test_api_key},
+        )
+
+    assert response.status_code == 200, response.text
+    # TestClient runs BackgroundTasks synchronously after the response, so by
+    # the time .get() returns the executes have already fired.
+    assert len(captured.calls) == 1, (
+        f"expected exactly one session.execute call, got {len(captured.calls)}"
+    )
+    rows = captured.calls[0]
+    assert len(rows) == 4, f"expected 4 rows (horizon_weeks=4), got {len(rows)}"
+    first = rows[0]
+    assert first["sku"] == "MI-006"
+    assert first["channel"] == "Retail"
+    assert first["region"] == "PL-Central"
+    assert first["model_version"] == "forecaster_milk_v1"
+    # request_id must be UUID-shaped (32 hex chars) — never user-controlled.
+    assert isinstance(first["request_id"], str)
+    assert len(first["request_id"]) >= 16
+
+
+def test_forecast_route_does_not_propagate_prediction_log_failure(
+    monkeypatch, test_api_key
+) -> None:
+    """If the BackgroundTask DB write raises SQLAlchemyError the response must
+    still be 200 with the forecast body — failure is swallowed and logged."""
+    from contextlib import contextmanager
+    from sqlalchemy.exc import SQLAlchemyError
+
+    _, forecast_route = _stub_forecast_dependencies(monkeypatch, horizon_weeks=4)
+
+    @contextmanager
+    def _raising_scope():
+        raise SQLAlchemyError("simulated DB outage")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(forecast_route, "session_scope", _raising_scope, raising=True)
+
+    with _patched_engine(monkeypatch, {}):
+        client = TestClient(_build_test_app())
+        response = client.get(
+            "/api/v1/forecast/MI-006",
+            params={"channel": "Retail", "region": "PL-Central", "horizon_weeks": 4},
+            headers={"X-API-Key": test_api_key},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sku"] == "MI-006"
+    assert len(body["predicted_units"]) == 4
+
+
+def test_forecast_route_prediction_log_idempotent_on_duplicate_request(
+    monkeypatch, test_api_key
+) -> None:
+    """Two identical /forecast requests with the same correlation_id must both
+    succeed; the underlying SQL relies on ON CONFLICT DO NOTHING for idempotency.
+
+    The route's SQL string is asserted to contain the conflict clause as well —
+    if a future edit drops it the test fails loudly.
+    """
+    _, forecast_route = _stub_forecast_dependencies(monkeypatch, horizon_weeks=2)
+    captured = _install_capturing_session(monkeypatch, forecast_route)
+
+    with _patched_engine(monkeypatch, {}):
+        client = TestClient(_build_test_app())
+        # Same correlation header on both requests (route uses it as request_id).
+        headers = {"X-API-Key": test_api_key, "X-Correlation-ID": "fixed-corr-id-12345"}
+        params = {"channel": "Retail", "region": "PL-Central", "horizon_weeks": 2}
+        first = client.get("/api/v1/forecast/MI-006", params=params, headers=headers)
+        second = client.get("/api/v1/forecast/MI-006", params=params, headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    # Both background tasks must have executed (no exception).
+    assert len(captured.calls) == 2
+
+    # Verify the SQL itself uses ON CONFLICT DO NOTHING (Postgres idempotency).
+    import inspect
+    source = inspect.getsource(forecast_route._write_prediction_log)
+    assert "ON CONFLICT" in source
+    assert "DO NOTHING" in source
+
+
+def test_health_includes_phase_d_fields_with_safe_defaults(
+    monkeypatch, fake_health_payloads
+) -> None:
+    """When model_lineage and model_performance_live are empty, /health must
+    expose the new Phase D fields with safe defaults — no exception, no 500.
+    """
+    with _patched_engine(monkeypatch, fake_health_payloads):
+        client = TestClient(_build_test_app())
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "days_since_last_retrain" in body
+    assert body["days_since_last_retrain"] is None  # MAX(...) over empty → None
+    assert "live_mape_by_category" in body
+    assert body["live_mape_by_category"] == {}
+    assert "stale_model_warning" in body
+    assert body["stale_model_warning"] == []
+    # Row counts include the three new tables (extension to _TABLES_TO_COUNT).
+    for new_table in ("prediction_log", "model_lineage", "model_performance_live"):
+        assert new_table in body["row_counts"], (
+            f"row_counts missing Phase D table {new_table}"
+        )

@@ -615,3 +615,257 @@ def test_anomaly_price_change_detected(make_weekly_row) -> None:
     price_alerts = [a for a in alerts if a.alert_type == "price_anomaly"]
     assert price_alerts, "expected price_anomaly alert for >15% deviation"
     assert price_alerts[0].severity == "LOW"
+
+
+# ---------------- Phase D: registry.compare_to_incumbent -------------------
+
+def test_compare_to_incumbent_no_incumbent(temp_model_dir: Path) -> None:
+    """When no model is registered, decision must be 'no_incumbent'."""
+    decision = registry.compare_to_incumbent("brand_new_model", {"mape": 10.0})
+    assert decision == "no_incumbent"
+
+
+def test_compare_to_incumbent_promoted_when_challenger_better(temp_model_dir: Path) -> None:
+    """Challenger with lower MAPE than incumbent must be promoted."""
+    # Register an incumbent with MAPE=20
+    registry.save_model({"w": 1}, "test_cat", {"mape": 20.0, "rmse": 5.0}, ["f1"])
+    # Challenger with MAPE=15 is clearly better
+    decision = registry.compare_to_incumbent("test_cat", {"mape": 15.0})
+    assert decision == "promoted"
+
+
+def test_compare_to_incumbent_rejected_when_challenger_worse(temp_model_dir: Path) -> None:
+    """Challenger MAPE > incumbent * 1.05 must be rejected."""
+    registry.save_model({"w": 1}, "test_cat2", {"mape": 10.0, "rmse": 3.0}, ["f1"])
+    # Challenger at MAPE=11 is > 10 * 1.05 = 10.5 → rejected
+    decision = registry.compare_to_incumbent("test_cat2", {"mape": 11.0})
+    assert decision == "rejected"
+
+
+def test_compare_to_incumbent_promoted_when_within_tolerance(temp_model_dir: Path) -> None:
+    """Challenger within 5% of incumbent must be promoted (simpler model wins)."""
+    registry.save_model({"w": 1}, "test_cat3", {"mape": 10.0, "rmse": 3.0}, ["f1"])
+    # Challenger at MAPE=10.4 is within 5% → promoted
+    decision = registry.compare_to_incumbent("test_cat3", {"mape": 10.4})
+    assert decision == "promoted"
+
+
+# ---------------- Phase D: registry.record_lineage -------------------------
+
+def test_record_lineage_inserts_row(temp_model_dir: Path, monkeypatch) -> None:
+    """record_lineage must call session.execute exactly once with correct params."""
+    captured: list[dict] = []
+
+    class _FakeSession:
+        def execute(self, _stmt, params):  # type: ignore[override]
+            captured.append(params)
+        def commit(self) -> None: pass
+        def rollback(self) -> None: pass
+        def close(self) -> None: pass
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_scope():
+        yield _FakeSession()
+
+    monkeypatch.setattr(registry, "session_scope", _fake_scope)
+    registry.record_lineage(
+        run_id="test123",
+        category="Milk",
+        model_version="forecaster_milk_v2",
+        data_hash="abc123",
+        training_rows=500,
+        train_metrics={"mape": 12.5, "rmse": 10.0, "mae": 8.0, "r2": 0.5},
+        incumbent_version="forecaster_milk_v1",
+        incumbent_mape=15.0,
+        promotion_decision="promoted",
+        drift_warnings=[],
+        notes="test run",
+    )
+    assert len(captured) == 1
+    row = captured[0]
+    assert row["run_id"] == "test123"
+    assert row["category"] == "Milk"
+    assert row["promotion_decision"] == "promoted"
+    assert row["train_mape"] == pytest.approx(12.5, abs=0.001)
+
+
+def test_record_lineage_caps_mape_overflow(temp_model_dir: Path, monkeypatch) -> None:
+    """Astronomically large MAPE values must be capped at 9999 before DB insert."""
+    captured: list[dict] = []
+
+    class _FakeSession:
+        def execute(self, _stmt, params):  # type: ignore[override]
+            captured.append(params)
+        def commit(self) -> None: pass
+        def rollback(self) -> None: pass
+        def close(self) -> None: pass
+
+    from contextlib import contextmanager
+    @contextmanager
+    def _fake_scope():
+        yield _FakeSession()
+
+    monkeypatch.setattr(registry, "session_scope", _fake_scope)
+    registry.record_lineage(
+        run_id="overflow_test",
+        category="SnackBar",
+        model_version="forecaster_snackbar_v1",
+        data_hash="deadbeef",
+        training_rows=100,
+        train_metrics={"mape": 1e12, "rmse": 30.0, "mae": 20.0, "r2": -0.1},
+        incumbent_version=None,
+        incumbent_mape=None,
+        promotion_decision="no_incumbent",
+        drift_warnings=[],
+    )
+    assert len(captured) == 1
+    assert captured[0]["train_mape"] <= 9999.0, "MAPE must be capped at 9999"
+
+
+# ---------------- Phase D round 4: exact threshold + drift detector ----------
+
+
+def test_compare_to_incumbent_loose_rule_promote_at_exactly_5pct(temp_model_dir: Path) -> None:
+    """Loose rule boundary: candidate_mape == incumbent * 1.05 must promote.
+
+    The rule reads `if candidate_mape > incumbent * 1.05: reject`. Therefore
+    EXACTLY 1.05x must still promote. Incumbent=10.0 → boundary is 10.5.
+    """
+    registry.save_model({"w": 1}, "boundary_test_promote", {"mape": 10.0}, ["f1"])
+    decision = registry.compare_to_incumbent(
+        "boundary_test_promote", {"mape": 10.5}
+    )
+    assert decision == "promoted", (
+        "candidate at exactly incumbent*1.05 should promote (rule is strict >)"
+    )
+
+
+def test_compare_to_incumbent_loose_rule_reject_just_above_5pct(temp_model_dir: Path) -> None:
+    """Loose rule boundary: candidate_mape just above incumbent * 1.05 must reject.
+
+    Spec: 0.21 * 1.05 = 0.2205. Therefore candidate `0.220` is below the
+    boundary → promote; candidate `0.221` exceeds it → reject. Incumbent here
+    is 0.21 (not 0.20).
+    """
+    registry.save_model({"w": 1}, "boundary_test_reject", {"mape": 0.21}, ["f1"])
+    promote_decision = registry.compare_to_incumbent(
+        "boundary_test_reject", {"mape": 0.220}
+    )
+    assert promote_decision == "promoted", (
+        f"0.220 < 0.21 * 1.05 = 0.2205 — must promote, got {promote_decision}"
+    )
+
+    # Re-register fresh incumbent name for the rejection-side test.
+    registry.save_model({"w": 1}, "boundary_test_reject2", {"mape": 0.21}, ["f1"])
+    reject_decision = registry.compare_to_incumbent(
+        "boundary_test_reject2", {"mape": 0.221}
+    )
+    assert reject_decision == "rejected", (
+        f"0.221 > 0.21 * 1.05 = 0.2205 — must reject, got {reject_decision}"
+    )
+
+
+def test_compare_to_incumbent_rejects_at_30_vs_20(temp_model_dir: Path) -> None:
+    """Spec example: candidate=0.30, incumbent=0.20 must reject (50% worse)."""
+    registry.save_model({"w": 1}, "spec_example_reject", {"mape": 0.20}, ["f1"])
+    decision = registry.compare_to_incumbent(
+        "spec_example_reject", {"mape": 0.30}
+    )
+    assert decision == "rejected"
+
+
+def test_drift_detector_clean_when_baselines_match(make_weekly_row) -> None:
+    """No drift warnings when current feature means equal stored baselines."""
+    from scripts.run_retraining_pipeline import _detect_drift
+
+    rows = [make_weekly_row(units_sold=100.0 + i * 0.1) for i in range(50)]
+    frame = pd.DataFrame(rows)
+    baselines = {
+        "units_sold": {"mean": float(frame["units_sold"].mean()),
+                       "std": float(frame["units_sold"].std())},
+    }
+    warnings = _detect_drift(frame, baselines)
+    assert warnings == [], f"expected zero warnings, got {warnings}"
+
+
+def test_drift_detector_flags_three_sigma_shift(make_weekly_row) -> None:
+    """A 3σ shift in mean must produce one drift warning with severity 'warn'."""
+    from scripts.run_retraining_pipeline import _detect_drift
+
+    rows = [make_weekly_row(units_sold=100.0 + i) for i in range(20)]
+    frame = pd.DataFrame(rows)
+    actual_mean = float(frame["units_sold"].mean())
+    actual_std = float(frame["units_sold"].std())
+    # WHY: synth a baseline whose mean is 3 std-dev BELOW the current mean →
+    # _detect_drift computes shift = |actual - baseline_mean| > 2 * std.
+    baselines = {
+        "units_sold": {
+            "mean": actual_mean - 3 * actual_std,
+            "std": actual_std,
+        }
+    }
+    warnings = _detect_drift(frame, baselines)
+    assert len(warnings) == 1, f"expected exactly one drift warning, got {warnings}"
+    warning = warnings[0]
+    assert warning["feature"] == "units_sold"
+    assert warning["severity"] == "warn"
+    assert warning["sigma_shift"] >= 2.0
+
+
+def test_drift_detector_returns_empty_when_no_baselines(make_weekly_row) -> None:
+    """When no incumbent baselines exist, drift detector must return [] silently."""
+    from scripts.run_retraining_pipeline import _detect_drift
+
+    frame = pd.DataFrame([make_weekly_row()])
+    assert _detect_drift(frame, {}) == []
+
+
+def test_drift_detector_skips_zero_std_feature(make_weekly_row) -> None:
+    """Features with std~=0 in baseline are skipped (no spurious warnings).
+
+    WHY: dividing shift by zero std would produce inf/NaN; the implementation
+    short-circuits at b_std < 1e-9.
+    """
+    from scripts.run_retraining_pipeline import _detect_drift
+
+    frame = pd.DataFrame([make_weekly_row(units_sold=100.0)])
+    baselines = {"units_sold": {"mean": 50.0, "std": 0.0}}
+    assert _detect_drift(frame, baselines) == []
+
+
+def test_compute_feature_baselines_uses_training_data_only(synthetic_training_df) -> None:
+    """`_compute_feature_baselines` returns dict with mean+std per numeric column,
+    using the training feature frame ONLY — never reaches into a holdout slice.
+    """
+    train = synthetic_training_df.head(200)
+    baselines = registry._compute_feature_baselines(train)
+    assert "units_sold" in baselines
+    assert "mean" in baselines["units_sold"]
+    assert "std" in baselines["units_sold"]
+    # Sanity: mean / std must equal what the input frame produces (no leakage).
+    assert baselines["units_sold"]["mean"] == pytest.approx(float(train["units_sold"].mean()))
+    assert baselines["units_sold"]["std"] == pytest.approx(float(train["units_sold"].std() or 0.0))
+
+
+def test_compute_feature_baselines_empty_returns_empty_dict() -> None:
+    """`_compute_feature_baselines(None)` and empty frame return {}."""
+    assert registry._compute_feature_baselines(None) == {}
+    assert registry._compute_feature_baselines(pd.DataFrame()) == {}
+
+
+def test_save_model_persists_feature_baselines_in_metadata(temp_model_dir: Path) -> None:
+    """When `feature_frame` is passed, the metadata JSON must include the
+    computed `feature_baselines` block — that's what the drift detector reads."""
+    import json
+
+    rows = [{"a": float(i), "b": float(i * 2)} for i in range(10)]
+    frame = pd.DataFrame(rows)
+    info = registry.save_model(
+        {"w": 1}, "baseline_persist_test", {"mape": 5.0}, ["a", "b"],
+        feature_frame=frame,
+    )
+    metadata = json.loads(info.metadata_path.read_text(encoding="utf-8"))
+    assert "feature_baselines" in metadata
+    assert "a" in metadata["feature_baselines"]
+    assert metadata["feature_baselines"]["a"]["mean"] == pytest.approx(4.5)

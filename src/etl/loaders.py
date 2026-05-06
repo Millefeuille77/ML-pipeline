@@ -24,6 +24,9 @@ _ALLOWED_TABLES: Final[frozenset[str]] = frozenset(
         "enrichment_features",
         "demand_forecasts",
         "batch_predictions",
+        "prediction_log",
+        "model_lineage",
+        "model_performance_live",
     }
 )
 

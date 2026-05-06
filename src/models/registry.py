@@ -2,6 +2,8 @@
 
 Versioned filenames: `{name}_v{N}_{YYYYMMDD-HHMMSS}.joblib` with a
 sidecar JSON file capturing metadata.
+
+Phase D extensions: compare_to_incumbent, record_lineage.
 """
 from __future__ import annotations
 
@@ -13,8 +15,12 @@ from pathlib import Path
 from typing import Any, Final
 
 import joblib
+import numpy as np
+import pandas as pd
+from sqlalchemy import text
 
 from config.settings import get_settings
+from src.database.connection import session_scope
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +68,17 @@ def _next_version(name: str) -> int:
     return max(info.version for info in existing) + 1
 
 
+def _compute_feature_baselines(frame: pd.DataFrame | None) -> dict[str, dict[str, float]]:
+    """Return per-feature {mean, std} dict for drift detection.
+
+    WHY: snapshot at training time avoids reloading full CSV during live drift checks.
+    """
+    if frame is None or frame.empty:
+        return {}
+    cols = frame.select_dtypes(include=[np.number]).columns
+    return {c: {"mean": float(frame[c].mean()), "std": float(frame[c].std() or 0.0)} for c in cols}
+
+
 def save_model(
     estimator: Any,
     name: str,
@@ -70,6 +87,7 @@ def save_model(
     *,
     training_rows: int = 0,
     category: str | None = None,
+    feature_frame: pd.DataFrame | None = None,
 ) -> ModelInfo:
     """Persist `estimator` under a versioned filename inside MODEL_DIR.
 
@@ -80,6 +98,7 @@ def save_model(
         features: Ordered feature names used at training time.
         training_rows: Number of training rows.
         category: Optional category this model is specialized for.
+        feature_frame: Training feature matrix used to compute drift baselines.
 
     Returns:
         ModelInfo describing the saved artifact.
@@ -90,6 +109,7 @@ def save_model(
     artifact_path = _models_dir() / f"{name}_v{version}_{timestamp}.joblib"
     metadata_path = artifact_path.with_suffix(".json")
     joblib.dump(estimator, artifact_path)
+    feature_baselines = _compute_feature_baselines(feature_frame)  # WHY: persisted for Phase D drift checks
     metadata = {
         "name": name,
         "version": version,
@@ -98,6 +118,7 @@ def save_model(
         "training_rows": training_rows,
         "category": category,
         "created_at": timestamp,
+        "feature_baselines": feature_baselines,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     # WHY: "name" is a reserved LogRecord field; use model_name to avoid KeyError
@@ -186,3 +207,86 @@ def get_model(name: str, version: str | int = "latest") -> tuple[Any, ModelInfo]
         info = matches[0]
     estimator = joblib.load(info.path)
     return estimator, info
+
+
+# ── Phase D: MLOps extensions ──────────────────────────────────────────────
+
+_INCUMBENT_TOLERANCE: Final[float] = 1.05  # challenger MAPE must be ≤ incumbent * 1.05
+
+
+def compare_to_incumbent(name: str, candidate_metrics: dict[str, float]) -> str:
+    """Return 'promoted', 'rejected', or 'no_incumbent' for a challenger model.
+
+    Args:
+        name: Logical model name.
+        candidate_metrics: Must contain "mape".
+
+    Returns:
+        Decision string; rejected when candidate MAPE > incumbent * 1.05.
+    """
+    try:
+        _estimator, incumbent_info = get_model(name, "latest")
+    except FileNotFoundError:
+        return "no_incumbent"
+    incumbent_mape = incumbent_info.metrics.get("mape", float("inf"))
+    candidate_mape = candidate_metrics.get("mape", float("inf"))
+    # WHY: 5% slack lets minor noise not trigger spurious promotions
+    if candidate_mape > incumbent_mape * _INCUMBENT_TOLERANCE:
+        logger.info("model_rejected", extra={"model_name": name, "candidate_mape": candidate_mape})
+        return "rejected"
+    return "promoted"
+
+
+def record_lineage(
+    run_id: str,
+    category: str,
+    model_version: str,
+    data_hash: str,
+    training_rows: int,
+    train_metrics: dict[str, float],
+    incumbent_version: str | None,
+    incumbent_mape: float | None,
+    promotion_decision: str,
+    drift_warnings: list[dict],
+    notes: str = "",
+) -> None:
+    """Insert one audit row into model_lineage regardless of promotion decision."""
+    sql = text(
+        "INSERT INTO model_lineage "
+        "(run_id, started_at, completed_at, category, model_version, data_hash, "
+        "training_rows, train_mape, train_rmse, train_mae, train_r2, "
+        "incumbent_version, incumbent_mape, promotion_decision, drift_warnings, notes) "
+        "VALUES (:run_id, NOW(), NOW(), :category, :model_version, :data_hash, "
+        ":training_rows, :train_mape, :train_rmse, :train_mae, :train_r2, "
+        ":incumbent_version, :incumbent_mape, :promotion_decision, "
+        "CAST(:drift_warnings AS JSONB), :notes)"
+    )
+    # WHY: NUMERIC(10,6) caps at 9999.999999; runaway MAPE from near-zero targets would overflow
+    def _safe_metric(val: float | None) -> float | None:
+        if val is None:
+            return None
+        v = float(val)
+        return round(min(abs(v), 9999.0) * (1.0 if v >= 0 else -1.0), 6)
+
+    params = {
+        "run_id": run_id,
+        "category": category,
+        "model_version": model_version,
+        "data_hash": data_hash,
+        "training_rows": training_rows,
+        "train_mape": _safe_metric(train_metrics.get("mape")),
+        "train_rmse": _safe_metric(train_metrics.get("rmse")),
+        "train_mae": _safe_metric(train_metrics.get("mae")),
+        "train_r2": _safe_metric(train_metrics.get("r2")),
+        "incumbent_version": incumbent_version,
+        "incumbent_mape": _safe_metric(incumbent_mape),
+        "promotion_decision": promotion_decision,
+        "drift_warnings": json.dumps(drift_warnings),
+        "notes": notes,
+    }
+    with session_scope() as session:
+        session.execute(sql, params)
+    logger.info(
+        "lineage_recorded",
+        extra={"run_id": run_id, "category": category, "decision": promotion_decision},
+    )
