@@ -2,6 +2,10 @@
 # Triggered manually (`gcloud builds submit`) or via a Cloud Build trigger
 # wired to the GitHub repo.
 #
+# Uses ${BUILD_ID} (always populated by Cloud Build) instead of ${SHORT_SHA}
+# (only populated for git-source builds) so manual `gcloud builds submit`
+# from a local directory works.
+#
 # Deploys to Cloud Run (region from substitution _REGION) connecting to a
 # Cloud SQL Postgres instance via Unix socket. Secrets are pulled from
 # Secret Manager at deploy time and exposed to the service as env vars.
@@ -27,7 +31,7 @@ steps:
     name: gcr.io/cloud-builders/docker
     args:
       - build
-      - --tag=${_IMAGE}:${SHORT_SHA}
+      - --tag=${_IMAGE}:${BUILD_ID}
       - --tag=${_IMAGE}:latest
       - --file=Dockerfile
       - .
@@ -43,11 +47,11 @@ steps:
       - run
       - deploy
       - ${_SERVICE}
-      - --image=${_IMAGE}:${SHORT_SHA}
+      - --image=${_IMAGE}:${BUILD_ID}
       - --region=${_REGION}
       - --platform=managed
       - --add-cloudsql-instances=${_CLOUD_SQL_INSTANCE}
-      - --set-env-vars=DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},APP_VERSION=${SHORT_SHA}
+      - --set-env-vars=DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},APP_VERSION=${BUILD_ID}
       - --set-secrets=DB_PASSWORD=db-password:latest,API_KEY=api-key:latest
       - --allow-unauthenticated
       - --port=8000
@@ -59,7 +63,7 @@ steps:
       - --concurrency=20
 
 images:
-  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:${BUILD_ID}
   - ${_IMAGE}:latest
 
 options:
