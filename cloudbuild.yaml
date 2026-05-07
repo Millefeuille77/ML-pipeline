@@ -50,7 +50,7 @@ steps:
       - --set-env-vars=DB_HOST=/cloudsql/${_CLOUD_SQL_INSTANCE},DB_NAME=${_DB_NAME},DB_USER=${_DB_USER},APP_VERSION=${SHORT_SHA}
       - --set-secrets=DB_PASSWORD=db-password:latest,API_KEY=api-key:latest
       - --allow-unauthenticated
-      - --port=8080
+      - --port=8000
       - --memory=1Gi
       - --cpu=1
       - --min-instances=0
