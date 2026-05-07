@@ -5,6 +5,14 @@ This is the MVP-grade GCP deployment path. Cloud Run for the app
 the data, Secret Manager for credentials, Artifact Registry for the
 image, Cloud Build for the pipeline.
 
+> **Important — do NOT suppress stderr on `gcloud sql instances create`.**
+> If the create fails (quota, billing-pending, deprecated tier), the error
+> message is the only signal. Without it the script keeps running and
+> every subsequent SQL Admin API call returns 403 (because the instance
+> doesn't exist AND you can't enumerate non-existent instances). This
+> error chain is hard to diagnose and wasted ~30 min of debug time on
+> a real deployment.
+
 ## Architecture
 
 ```
