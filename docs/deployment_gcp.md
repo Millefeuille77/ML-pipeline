@@ -76,8 +76,13 @@ gcloud artifacts repositories create "$REPO" \
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/app"
 
 # 4. Cloud SQL instance + database + user
+# WHY --edition=ENTERPRISE: as of late 2024 GCP defaults new instances in
+# many regions to ENTERPRISE_PLUS edition, which rejects db-f1-micro and
+# forces the ~$50/mo db-perf-optimized-N-* tiers. Explicit ENTERPRISE
+# preserves the ~$10/mo MVP cost target.
 gcloud sql instances create "$SQL_INSTANCE" \
   --database-version=POSTGRES_16 \
+  --edition=ENTERPRISE \
   --tier="$SQL_TIER" \
   --region="$REGION" \
   --storage-size=10GB \
