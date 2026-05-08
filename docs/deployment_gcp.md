@@ -264,3 +264,28 @@ gcloud secrets delete api-key
 6. **One Cloud SQL instance, one zone.** db-f1-micro has no HA. For
    production, switch to a regional-HA tier and enable point-in-time
    recovery.
+
+---
+
+## Post-deploy retrospective (real issues hit on a live deployment)
+
+Recording these so they're caught up-front next time:
+
+1. **`cloudbuild.yaml` port mismatch** — Cloud Run's `--port=8080` vs the Dockerfile listening on `8000` produces a silent routing failure. Cloud Run spins up healthy containers (Docker layer succeeds) but every request 503s because the front-end routes to the wrong port. Fix: keep `--port=8000` matched to the Dockerfile `EXPOSE`.
+
+2. **`${SHORT_SHA}` is empty for manual `gcloud builds submit` from a local tarball.** Only populated when Cloud Build is triggered by a git source (e.g. a Cloud Build trigger on a GitHub push). Without a value, image tags become `app:` (empty after the colon) and the build fails on `invalid image name`. Fix: use `${BUILD_ID}` in `cloudbuild.yaml` — it's always populated, in both manual and trigger flows.
+
+3. **`gcloud sql instances create` failures are silent if you suppress stderr.** A failed create doesn't error LATER — it just means subsequent `gcloud sql users ...` calls return 403 (because the instance doesn't exist AND you can't enumerate non-existent instances; GCP returns 403 instead of 404 for security). The 403 is misleading and easy to spend hours diagnosing. Fix: never `2>/dev/null` resource provisioning steps; let stderr surface.
+
+4. **`--edition=ENTERPRISE_PLUS` is the new default in several regions including `asia-southeast2`.** ENTERPRISE_PLUS rejects `db-f1-micro` and forces `db-perf-optimized-N-*` tiers (~$50/mo minimum). Fix: explicitly pass `--edition=ENTERPRISE` to keep the cheap shared-core tier available (~$10/mo).
+
+5. **Secret/password drift across three locations** — `~/fmcg-secrets.txt`, Secret Manager `db-password:latest`, and the actual Cloud SQL user. Any one drifting from the others manifests as `password authentication failed` in init_db logs. Fix: when rotating, set all three atomically in one script block. Verify by connecting via the Cloud SQL Auth Proxy with `PGPASSWORD=$NEW_PWD psql ...` so there's no interactive paste step that can corrupt the value.
+
+6. **`db-f1-micro` write throughput is ~10-30× slower than the local Docker baseline.** A 222k-row `init_db` that runs in ~50s on a developer laptop takes 15-25 minutes on `db-f1-micro` via Unix socket. The default Cloud Run Job task-timeout of 600s (10 minutes) is not enough. Fix: `--task-timeout=3600s` on the init job, or pre-load via a higher-tier instance and downgrade after.
+
+7. **`--allow-unauthenticated` does not survive every redeploy chain.** After a series of `gcloud run services update ...` operations, the `allUsers` IAM binding can be missing — Cloud Run's frontend then returns HTML 403 to anonymous requests. Fix: explicitly run `gcloud run services add-iam-policy-binding ... --member=allUsers --role=roles/run.invoker` after the final deploy. If org policy `iam.allowedPolicyMemberDomains` blocks `allUsers`, fall back to authenticated curl with an identity token.
+
+8. **Cloud Run service URL pattern changed** post-late-2024. New deploys use `https://<service>-<project-number>.<region>.run.app` (current). Older URLs of the form `https://<service>-<random>-<region-code>.a.run.app` may persist as aliases for a while but are not the canonical address — use `gcloud run services describe ... --format="value(status.url)"` to get the live one.
+
+9. **Cloud Shell's gcloud auth token is cached at session start.** IAM bindings granted DURING a session do not propagate to the existing token — operations may continue to 403. Fix: restart Cloud Shell after granting yourself a new role; the new session pulls a fresh token.
+
